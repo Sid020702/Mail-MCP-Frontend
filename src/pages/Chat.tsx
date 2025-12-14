@@ -134,7 +134,7 @@ const Chat = () => {
 
             const stream = await groq.responses.create({
                 model: "moonshotai/kimi-k2-instruct-0905",
-                input: inputMessages,
+                input: [{ role: "user", content: userInput }],
                 stream: true,
                 tools: [
                     {
