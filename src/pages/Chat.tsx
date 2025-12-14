@@ -35,7 +35,7 @@ const Chat = () => {
     const syncEmails = async (auth: AuthData) => {
         try {
             setIsSyncing(true);
-            await fetch("http://localhost:8000/api/sync-emails", {
+            await fetch("https://mail-agent.fastmcp.app/api/sync-emails", {
                 method: "POST",
                 body: JSON.stringify({
                     max_fetch: 50,
@@ -87,7 +87,7 @@ const Chat = () => {
     }, [messages]);
 
     async function fetchContext(accessToken: string) {
-        const res = await fetch("http://localhost:8000/api/context", {
+        const res = await fetch("https://mail-agent.fastmcp.app/api/context", {
             headers: {
                 Authorization: `Bearer ${accessToken}`,
             },
@@ -155,7 +155,7 @@ const Chat = () => {
                     {
                         type: "mcp",
                         server_label: "mail-agent",
-                        server_url: "https://24eae87a0929.ngrok-free.app/mcp",
+                        server_url: "https://mail-agent.fastmcp.app/mcp",
                         require_approval: "never",
                         authorization: currentAuth.accessToken,
                     },
