@@ -39,10 +39,10 @@ const Chat = () => {
                 method: "POST",
                 body: JSON.stringify({
                     max_fetch: 50,
-                    user_email: auth?.email,
                 }),
                 headers: {
                     "Content-Type": "application/json",
+                    "Authorization": `Bearer ${auth.accessToken}`
                 },
             });
         } catch (err) {
@@ -51,6 +51,20 @@ const Chat = () => {
             setIsSyncing(false);
         }
     };
+
+    const clearContext = async (auth: AuthData) => {
+        try {
+            await fetch("https://mail-agent.fastmcp.app/api/context/clear", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${auth.accessToken}`
+                },
+            });
+        } catch (err) {
+            console.error("Email sync failed:", err);
+        }
+    }
 
     const isTokenExpired = (auth: AuthData): boolean => {
         if (!auth.expiresAt) return false;
@@ -79,6 +93,7 @@ const Chat = () => {
         if (auth) {
             setAuthData(auth);
             syncEmails(auth);
+            clearContext(auth)
         }
     }, [navigate]);
 
@@ -150,7 +165,7 @@ const Chat = () => {
 
             const response = await groq.responses.create({
                 model: "moonshotai/kimi-k2-instruct-0905",
-                input: userInput,
+                input: messages,
                 tools: [
                     {
                         type: "mcp",
@@ -290,7 +305,7 @@ const Chat = () => {
                                 Ask about your emails
                             </h2>
                             <p className="text-muted-foreground">
-                                Try "Show me unread emails" or "Summarize my inbox"
+                                Try "Fetch my recent mails" or "Do I have any mail for credit card bills?"
                             </p>
                         </div>
                     ) : (
