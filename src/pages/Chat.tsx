@@ -31,60 +31,44 @@ const Chat = () => {
     const [isSyncing, setIsSyncing] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const stopStreamingRef = useRef(false);
 
     const syncEmails = async (auth: AuthData) => {
         try {
             setIsSyncing(true);
             await fetch("https://mail-agent.fastmcp.app/api/sync-emails", {
                 method: "POST",
-                body: JSON.stringify({
-                    max_fetch: 50,
-                }),
+                body: JSON.stringify({ max_fetch: 50 }),
                 headers: {
                     "Content-Type": "application/json",
-                    "Authorization": `Bearer ${auth.accessToken}`
+                    Authorization: `Bearer ${auth.accessToken}`,
                 },
             });
-        } catch (err) {
-            console.error("Email sync failed:", err);
         } finally {
             setIsSyncing(false);
         }
     };
 
     const clearContext = async (auth: AuthData) => {
-        try {
-            await fetch("https://mail-agent.fastmcp.app/api/context/clear", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${auth.accessToken}`
-                },
-            });
-        } catch (err) {
-            console.error("Email sync failed:", err);
-        }
-    }
-
-    const isTokenExpired = (auth: AuthData): boolean => {
-        if (!auth.expiresAt) return false;
-        return Date.now() >= auth.expiresAt;
+        await fetch("https://mail-agent.fastmcp.app/api/context/clear", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${auth.accessToken}`,
+            },
+        });
     };
+
+    const isTokenExpired = (auth: AuthData) =>
+        auth.expiresAt ? Date.now() >= auth.expiresAt : false;
 
     const checkAndRefreshAuth = (): AuthData | null => {
         const auth = getAuthData();
-
-        if (!auth) {
-            navigate("/");
-            return null;
-        }
-
-        if (isTokenExpired(auth)) {
+        if (!auth || isTokenExpired(auth)) {
             clearAuthData();
             navigate("/");
             return null;
         }
-
         return auth;
     };
 
@@ -93,7 +77,7 @@ const Chat = () => {
         if (auth) {
             setAuthData(auth);
             syncEmails(auth);
-            clearContext(auth)
+            clearContext(auth);
         }
     }, [navigate]);
 
@@ -103,13 +87,9 @@ const Chat = () => {
 
     async function fetchContext(accessToken: string) {
         const res = await fetch("https://mail-agent.fastmcp.app/api/context", {
-            headers: {
-                Authorization: `Bearer ${accessToken}`,
-            },
+            headers: { Authorization: `Bearer ${accessToken}` },
         });
-
         if (!res.ok) return [];
-
         const data = await res.json();
         return data.context ?? [];
     }
@@ -125,12 +105,12 @@ const Chat = () => {
     }
 
     const handleSend = async () => {
-        if (!input.trim()) return;
+        if (!input.trim() || isLoading) return;
 
-        // Check auth before sending
-        const currentAuth = checkAndRefreshAuth();
-        if (!currentAuth) return;
+        const auth = checkAndRefreshAuth();
+        if (!auth) return;
 
+        stopStreamingRef.current = false;
         const userInput = input;
         setInput("");
         setIsLoading(true);
@@ -140,86 +120,59 @@ const Chat = () => {
 
         setMessages((prev) => [
             ...prev,
-            {
-                id: crypto.randomUUID(),
-                role: "user",
-                content: userInput,
-                timestamp: new Date(),
-            },
-            {
-                id: assistantMessageId,
-                role: "assistant",
-                content: "",
-                timestamp: new Date(),
-                isStreaming: true,
-            },
+            { id: crypto.randomUUID(), role: "user", content: userInput, timestamp: new Date() },
+            { id: assistantMessageId, role: "assistant", content: "", timestamp: new Date(), isStreaming: true },
         ]);
 
         try {
-            const context = await fetchContext(currentAuth.accessToken);
+            const context = await fetchContext(auth.accessToken);
 
-            const messages = [
+            const inputMessages = [
                 ...contextToMessages(context),
                 { role: "user", content: userInput },
             ];
 
-            const response = await groq.responses.create({
+            const stream = await groq.responses.create({
                 model: "moonshotai/kimi-k2-instruct-0905",
-                input: messages,
+                input: inputMessages,
+                stream: true,
                 tools: [
                     {
                         type: "mcp",
                         server_label: "mail-agent",
                         server_url: "https://mail-agent.fastmcp.app/mcp",
                         require_approval: "never",
-                        authorization: currentAuth.accessToken,
+                        authorization: auth.accessToken,
                     },
                 ],
             });
 
-            setIsProcessing(false);
 
-            let fullContent = "";
-            for (const output of response.output ?? []) {
-                if (output.type === "message" && output.role === "assistant") {
-                    for (const item of output.content ?? []) {
-                        if (item.type === "output_text") {
-                            fullContent += item.text;
-                        }
-                    }
+            let accumulated = "";
+
+            for await (const event of stream) {
+                if (stopStreamingRef.current) break;
+
+                if (event.type === "response.output_text.delta") {
+                    accumulated += event.delta;
+                    setMessages((prev) =>
+                        prev.map((m) => (m.id === assistantMessageId ? { ...m, content: accumulated } : m))
+                    );
+                }
+
+                if (event.type === "response.completed") {
+                    setMessages((prev) =>
+                        prev.map((m) =>
+                            m.id === assistantMessageId ? { ...m, content: accumulated, isStreaming: false } : m
+                        )
+                    );
                 }
             }
-
-            for (let i = 0; i < fullContent.length; i += 4) {
-                const chunk = fullContent.slice(0, i + 4);
-
-                setMessages((prev) =>
-                    prev.map((m) =>
-                        m.id === assistantMessageId
-                            ? { ...m, content: chunk }
-                            : m
-                    )
-                );
-
-                await new Promise((r) => setTimeout(r, 12));
-            }
-
-            setMessages((prev) =>
-                prev.map((m) =>
-                    m.id === assistantMessageId
-                        ? { ...m, content: fullContent, isStreaming: false }
-                        : m
-                )
-            );
         } catch (err: any) {
             setMessages((prev) =>
                 prev.map((m) =>
                     m.id === assistantMessageId
-                        ? {
-                            ...m,
-                            content: `❌ ${err.message || "Unknown error"}`,
-                            isStreaming: false,
-                        }
+                        ? { ...m, content: `❌ ${err.message || "Unknown error"}`, isStreaming: false }
                         : m
                 )
             );
@@ -230,11 +183,8 @@ const Chat = () => {
     };
 
     const handleStop = () => {
-        setMessages((prev) =>
-            prev.map((msg) =>
-                msg.isStreaming ? { ...msg, isStreaming: false } : msg
-            )
-        );
+        stopStreamingRef.current = true;
+        setMessages((prev) => prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m)));
         setIsLoading(false);
         setIsProcessing(false);
     };
@@ -258,19 +208,13 @@ const Chat = () => {
                     <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
                         <Mail className="w-5 h-5 text-primary" />
                     </div>
-                    <span className="font-semibold text-foreground">MCP Mail</span>
+                    <span className="font-semibold">MCP Mail</span>
                 </div>
-
                 {authData && (
                     <div className="flex items-center gap-4">
-                        <span className="text-sm text-muted-foreground">
-                            {authData.email}
-                        </span>
-                        <button
-                            onClick={handleLogout}
-                            className="p-2 rounded-lg hover:bg-secondary transition-colors"
-                        >
-                            <LogOut className="w-4 h-4 text-muted-foreground" />
+                        <span className="text-sm text-muted-foreground">{authData.email}</span>
+                        <button onClick={handleLogout} className="p-2 rounded-lg hover:bg-secondary">
+                            <LogOut className="w-4 h-4" />
                         </button>
                     </div>
                 )}
@@ -294,69 +238,47 @@ const Chat = () => {
                 </div>
             )}
 
+            {messages.length === 0 && !isProcessing && (
+                <div className="flex-1 flex items-center justify-center text-center">
+                    <div>
+                        <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-primary/10 flex items-center justify-center">
+                            <Mail className="w-8 h-8 text-primary" />
+                        </div>
+                        <h2 className="text-xl font-semibold mb-2">Ask about your emails</h2>
+                        <p className="text-muted-foreground">
+                            Try “Fetch my recent mails” or “Any credit card bills due?”
+                        </p>
+                    </div>
+                </div>
+            )}
+
             <main className="flex-1 overflow-y-auto">
-                <div className="max-w-3xl mx-auto py-6 px-4">
-                    {messages.length === 0 ? (
-                        <div className="text-center py-20">
-                            <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-4">
-                                <Mail className="w-8 h-8 text-primary" />
-                            </div>
-                            <h2 className="text-xl font-semibold text-foreground mb-2">
-                                Ask about your emails
-                            </h2>
-                            <p className="text-muted-foreground">
-                                Try "Fetch my recent mails" or "Do I have any mail for credit card bills?"
-                            </p>
-                        </div>
-                    ) : (
-                        <div className="space-y-4">
-                            {messages.map((msg) => (
-                                <div
-                                    key={msg.id}
-                                    className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""
-                                        }`}
-                                >
-                                    {msg.role === "assistant" && (
-                                        <div className="w-8 h-8 rounded-lg bg-primary/10 flex-shrink-0 flex items-center justify-center">
-                                            <Bot className="w-4 h-4 text-primary" />
-                                        </div>
-                                    )}
-
-                                    <div
-                                        className={`max-w-[80%] rounded-2xl px-4 py-3 ${msg.role === "user"
-                                            ? "bg-primary text-primary-foreground"
-                                            : "bg-secondary text-foreground"
-                                            }`}
-                                    >
-                                        {msg.role === "assistant" ? (
-                                            <ReactMarkdown
-                                                remarkPlugins={[remarkGfm]}
-                                                rehypePlugins={[rehypeRaw]}
-                                            >
-                                                {msg.content}
-                                            </ReactMarkdown>
-                                        ) : (
-                                            <p className="whitespace-pre-wrap text-sm">
-                                                {msg.content}
-                                            </p>
-                                        )}
-
-                                        {msg.isStreaming && (
-                                            <span className="inline-block w-2 h-4 bg-current animate-pulse ml-1" />
-                                        )}
-                                    </div>
-
-                                    {msg.role === "user" && (
-                                        <div className="w-8 h-8 rounded-lg bg-muted flex-shrink-0 flex items-center justify-center">
-                                            <User className="w-4 h-4 text-muted-foreground" />
-                                        </div>
-                                    )}
+                <div className="max-w-3xl mx-auto py-6 px-4 space-y-4">
+                    {messages.map((msg) => (
+                        <div key={msg.id} className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}>
+                            {msg.role === "assistant" && (
+                                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                                    <Bot className="w-4 h-4 text-primary" />
                                 </div>
-                            ))}
-
-                            <div ref={messagesEndRef} />
+                            )}
+                            <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${msg.role === "user" ? "bg-primary text-primary-foreground" : "bg-secondary"}`}>
+                                {msg.role === "assistant" ? (
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+                                        {msg.content}
+                                    </ReactMarkdown>
+                                ) : (
+                                    <p className="whitespace-pre-wrap text-sm">{msg.content}</p>
+                                )}
+                                {msg.isStreaming && <span className="inline-block w-2 h-4 bg-current animate-pulse ml-1" />}
+                            </div>
+                            {msg.role === "user" && (
+                                <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
+                                    <User className="w-4 h-4" />
+                                </div>
+                            )}
                         </div>
-                    )}
+                    ))}
+                    <div ref={messagesEndRef} />
                 </div>
             </main>
 
@@ -367,15 +289,14 @@ const Chat = () => {
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={handleKeyDown}
                         placeholder="Ask about your emails..."
-                        className="flex-1 resize-none rounded-xl border border-border bg-secondary px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                        className="flex-1 resize-none rounded-xl border bg-secondary px-4 py-3 text-sm"
                         rows={1}
                         disabled={isSyncing || isLoading}
                     />
-
                     <button
                         onClick={isLoading ? handleStop : handleSend}
-                        disabled={(!input.trim() && !isLoading) || isSyncing}
-                        className="px-4 rounded-xl bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        disabled={isSyncing || (!input.trim() && !isLoading)}
+                        className="px-4 rounded-xl bg-primary text-primary-foreground"
                     >
                         {isLoading ? <Square className="w-4 h-4" /> : <Send className="w-4 h-4" />}
                     </button>
